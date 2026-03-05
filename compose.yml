@@ -26,17 +26,18 @@ services:
       retries: 3
       start_period: 10s
     entrypoint: /bin/sh
-    command: >
-      -c "
-      cat > /tmp/dnsdist.conf << 'CONF'
-      addLocal('0.0.0.0:53')
-      newServer({address='10.220.0.3:5353', pool='dnstt_1', checkInterval=10})
-      newServer({address='10.220.0.4:8853', pool='slip_1', checkInterval=10})
-      addAction('d1.meast.ir.', PoolAction('dnstt_1'))
-      addAction('s1.meast.ir.', PoolAction('slip_1'))
-      CONF
-      exec dnsdist -C /tmp/dnsdist.conf --supervised --disable-syslog
-      "
+    command:
+      - -c
+      - |
+        cat > /tmp/dnsdist.conf << 'CONF'
+        addLocal('0.0.0.0:53')
+        newServer({address='10.220.0.3:5353', pool='dnstt_1', checkInterval=10})
+        newServer({address='10.220.0.4:8853', pool='slip_1', checkInterval=10})
+        addAction('d1.meast.ir.', PoolAction('dnstt_1'))
+        addAction('s1.meast.ir.', PoolAction('slip_1'))
+        CONF
+        exec dnsdist -C /tmp/dnsdist.conf --supervised --disable-syslog
+
     networks:
       tunnel_net:
         ipv4_address: 10.220.0.2
@@ -56,20 +57,21 @@ services:
         limits:
           cpus: '0.2'
           memory: 500M
-    command: >
-      bash -c "
-      set -e
-      echo '[DNSTT] Downloading and building...'
-      rm -rf /tmp/dnstt
-      git clone --depth 1 https://www.bamsoftware.com/git/dnstt.git /tmp/dnstt
-      cd /tmp/dnstt/dnstt-server
-      env GOMAXPROCS=1 go build -p 1 -ldflags='-s -w' -o /usr/local/bin/dnstt-server .
-      echo '[DNSTT] Build complete. Starting server...'
-      exec /usr/local/bin/dnstt-server \
-        -udp 0.0.0.0:5353 \
-        -privkey 37d4703d2f494f7d53c505d79bf63090845852ecf4813d52eb70a764c1dd6319 \
-        d1.meast.ir 10.220.0.7:22
-      "
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        echo '[DNSTT] Downloading and building...'
+        rm -rf /tmp/dnstt
+        git clone --depth 1 https://www.bamsoftware.com/git/dnstt.git /tmp/dnstt
+        cd /tmp/dnstt/dnstt-server
+        env GOMAXPROCS=1 go build -p 1 -ldflags='-s -w' -o /usr/local/bin/dnstt-server .
+        echo '[DNSTT] Build complete. Starting server...'
+        exec /usr/local/bin/dnstt-server \
+          -udp 0.0.0.0:5353 \
+          -privkey 37d4703d2f494f7d53c505d79bf63090845852ecf4813d52eb70a764c1dd6319 \
+          d1.meast.ir 10.220.0.7:22
     networks:
       tunnel_net:
         ipv4_address: 10.220.0.3
@@ -89,22 +91,23 @@ services:
         limits:
           cpus: '0.10'
           memory: 150M
-    command: >
-      sh -c "
-      set -e
-      echo '[Slipstream] Installing dependencies...'
-      apt-get update -qq
-      apt-get install -y --no-install-recommends curl ca-certificates libgcc-s1 libc6
-      echo '[Slipstream] Downloading binary...'
-      curl -fSL https://github.com/EndPositive/slipstream/releases/download/v0.1.0/slipstream-server-v0.1.0-linux-x86_64 \
-        -o /usr/local/bin/slipstream-server
-      chmod +x /usr/local/bin/slipstream-server
-      echo '[Slipstream] Starting server...'
-      exec /usr/local/bin/slipstream-server \
-        --dns-listen-port=8853 \
-        --target-address=10.220.0.7:22 \
-        --domain=s1.meast.ir
-      "
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        echo '[Slipstream] Installing dependencies...'
+        apt-get update -qq
+        apt-get install -y --no-install-recommends curl ca-certificates libgcc-s1 libc6
+        echo '[Slipstream] Downloading binary...'
+        curl -fSL https://github.com/EndPositive/slipstream/releases/download/v0.1.0/slipstream-server-v0.1.0-linux-x86_64 \
+          -o /usr/local/bin/slipstream-server
+        chmod +x /usr/local/bin/slipstream-server
+        echo '[Slipstream] Starting server...'
+        exec /usr/local/bin/slipstream-server \
+          --dns-listen-port=8853 \
+          --target-address=10.220.0.7:22 \
+          --domain=s1.meast.ir
     networks:
       tunnel_net:
         ipv4_address: 10.220.0.4
