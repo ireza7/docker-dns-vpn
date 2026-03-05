@@ -1,0 +1,132 @@
+version: '3.8'
+
+services:
+  # ==========================================
+  # ۱. توزیع‌کننده ترافیک
+  # ==========================================
+  dnsdist:
+    image: powerdns/dnsdist-18
+    container_name: dns_multiplexer
+    restart: unless-stopped
+    ports:
+      - "53:53/udp"
+      - "53:53/tcp"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.05'
+          memory: 100M
+    entrypoint: /bin/sh
+    command: >
+      -c "
+      echo \"addLocal('0.0.0.0:53')\" > /tmp/dnsdist.conf &&
+      echo \"newServer({address='10.220.0.3:5353', pool='dnstt_1'})\" >> /tmp/dnsdist.conf &&
+      echo \"newServer({address='10.220.0.4:8853', pool='slip_1'})\" >> /tmp/dnsdist.conf &&
+      
+      echo \"addAction('d1.meast.ir.', PoolAction('dnstt_1'))\" >> /tmp/dnsdist.conf &&
+      echo \"addAction('s1.meast.ir.', PoolAction('slip_1'))\" >> /tmp/dnsdist.conf &&
+      
+      dnsdist -C /tmp/dnsdist.conf --supervised
+      "
+    networks:
+      tunnel_net:
+        ipv4_address: 10.220.0.2
+
+  # ==========================================
+  # ۲. سرور DNSTT اول
+  # ==========================================
+  dnstt-server-1:
+    image: golang:latest
+    container_name: dnstt_server_1
+    restart: unless-stopped
+    depends_on:
+      ssh-server:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '0.2'
+          memory: 500M
+    command: >
+      bash -c "
+      echo 'Downloading and building DNSTT...' &&
+      rm -rf /tmp/dnstt && 
+      git clone https://www.bamsoftware.com/git/dnstt.git /tmp/dnstt &&
+      cd /tmp/dnstt/dnstt-server &&
+      env GOMAXPROCS=1 go build -p 1 -ldflags=\"-s -w\" -o /usr/local/bin/dnstt-server &&
+      echo 'Starting DNSTT Server...' &&
+      /usr/local/bin/dnstt-server -udp 0.0.0.0:5353 -privkey 37d4703d2f494f7d53c505d79bf63090845852ecf4813d52eb70a764c1dd6319 d1.meast.ir 10.220.0.7:22
+      "
+    networks:
+      tunnel_net:
+        ipv4_address: 10.220.0.3
+
+  # ==========================================
+  # ۳. سرور Slipstream اول (نسخه نهایی: دانلود مستقیم + کتابخانه حیاتی)
+  # ==========================================
+  slipstream-server-1:
+    image: debian:stable-slim
+    container_name: slipstream_server_1
+    restart: unless-stopped
+    depends_on:
+      ssh-server:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '0.05'
+          memory: 150M
+    command: >
+      sh -c "
+      apt-get update && apt-get install -y curl ca-certificates libgcc-s1 &&
+      curl -L https://github.com/EndPositive/slipstream/releases/download/v0.1.0/slipstream-server-v0.1.0-linux-x86_64 -o /usr/local/bin/slipstream-server &&
+      chmod +x /usr/local/bin/slipstream-server &&
+      exec /usr/local/bin/slipstream-server --dns-listen-port=8853 --target-address=10.220.0.7:22 --domain=s1.meast.ir
+      "
+    networks:
+      tunnel_net:
+        ipv4_address: 10.220.0.4
+                 
+  # ==========================================
+  # ۴. سرویس SSH اختصاصی (مجهز به سیستم بررسی سلامت)
+  # ==========================================
+  ssh-server:
+    image: debian:stable-slim
+    container_name: tunnel_ssh
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.2'
+          memory: 250M
+    healthcheck:
+      test: ["CMD-SHELL", "pidof sshd || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    command:
+      - sh
+      - -c
+      - |
+        apt-get update
+        apt-get install -y openssh-server socat
+        mkdir -p /run/sshd
+        (useradd -m -s /bin/bash netmod || true)
+        echo 'netmod:123456' | chpasswd
+        echo 'AllowTcpForwarding yes' >> /etc/ssh/sshd_config
+        echo 'GatewayPorts yes' >> /etc/ssh/sshd_config
+        echo 'PermitTunnel yes' >> /etc/ssh/sshd_config
+        
+        socat TCP4-LISTEN:53,bind=127.0.0.53,reuseaddr,fork TCP4:1.1.1.1:53 &
+        
+        exec /usr/sbin/sshd -D -e
+    networks:
+      tunnel_net:
+        ipv4_address: 10.220.0.7
+
+networks:
+  tunnel_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.220.0.0/24
