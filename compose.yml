@@ -64,7 +64,7 @@ services:
         set -e
         echo '[DNSTT] Downloading and building...'
         rm -rf /tmp/dnstt
-        git clone --depth 1 https://www.bamsoftware.com/git/dnstt.git /tmp/dnstt
+        git clone --depth 1 https://github.com/Mygod/dnstt.git /tmp/dnstt
         cd /tmp/dnstt/dnstt-server
         env GOMAXPROCS=1 go build -p 1 -ldflags='-s -w' -o /usr/local/bin/dnstt-server .
         echo '[DNSTT] Build complete. Starting server...'
@@ -80,7 +80,7 @@ services:
   # ۳. سرور Slipstream اول
   # ==========================================
   slipstream-server-1:
-    image: debian:bookworm-slim
+    image: debian:bookworm
     container_name: slipstream_server_1
     restart: unless-stopped
     depends_on:
@@ -89,21 +89,29 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.10'
-          memory: 150M
+          cpus: '0.50'
+          memory: 1G
     command:
-      - sh
+      - bash
       - -c
       - |
         set -e
-        echo '[Slipstream] Installing dependencies...'
+        echo '[Slipstream] Installing build dependencies...'
         apt-get update -qq
-        apt-get install -y --no-install-recommends curl ca-certificates libgcc-s1 libc6
-        echo '[Slipstream] Downloading binary...'
-        curl -fSL https://github.com/EndPositive/slipstream/releases/download/v0.1.0/slipstream-server-v0.1.0-linux-x86_64 \
-          -o /usr/local/bin/slipstream-server
+        apt-get install -y --no-install-recommends \
+          git ca-certificates build-essential cmake meson pkg-config \
+          python3 libssl-dev
+        echo '[Slipstream] Cloning source...'
+        rm -rf /tmp/slipstream
+        git clone --depth 1 --recurse-submodules \
+          https://github.com/EndPositive/slipstream.git /tmp/slipstream
+        cd /tmp/slipstream
+        echo '[Slipstream] Building from source...'
+        meson setup builddir --buildtype=release
+        meson compile -C builddir
+        cp builddir/slipstream-server /usr/local/bin/slipstream-server
         chmod +x /usr/local/bin/slipstream-server
-        echo '[Slipstream] Starting server...'
+        echo '[Slipstream] Build complete. Starting server...'
         exec /usr/local/bin/slipstream-server \
           --dns-listen-port=8853 \
           --target-address=10.220.0.7:22 \
