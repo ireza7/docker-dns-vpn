@@ -1,11 +1,9 @@
-version: '3.8'
-
 services:
   # ==========================================
-  # ۱. توزیع‌کننده ترافیک
+  # ۱. توزیع‌کننده ترافیک DNS (dnsdist)
   # ==========================================
   dnsdist:
-    image: powerdns/dnsdist-18
+    image: powerdns/dnsdist-18:1.8.4
     container_name: dns_multiplexer
     restart: unless-stopped
     ports:
@@ -16,17 +14,28 @@ services:
         limits:
           cpus: '0.05'
           memory: 100M
+    depends_on:
+      dnstt-server-1:
+        condition: service_started
+      slipstream-server-1:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "echo | dnsdist -e 'showServers()' -C /tmp/dnsdist.conf 2>/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
     entrypoint: /bin/sh
     command: >
       -c "
-      echo \"addLocal('0.0.0.0:53')\" > /tmp/dnsdist.conf &&
-      echo \"newServer({address='10.220.0.3:5353', pool='dnstt_1'})\" >> /tmp/dnsdist.conf &&
-      echo \"newServer({address='10.220.0.4:8853', pool='slip_1'})\" >> /tmp/dnsdist.conf &&
-      
-      echo \"addAction('d1.meast.ir.', PoolAction('dnstt_1'))\" >> /tmp/dnsdist.conf &&
-      echo \"addAction('s1.meast.ir.', PoolAction('slip_1'))\" >> /tmp/dnsdist.conf &&
-      
-      dnsdist -C /tmp/dnsdist.conf --supervised
+      cat > /tmp/dnsdist.conf << 'CONF'
+      addLocal('0.0.0.0:53')
+      newServer({address='10.220.0.3:5353', pool='dnstt_1', checkInterval=10})
+      newServer({address='10.220.0.4:8853', pool='slip_1', checkInterval=10})
+      addAction('d1.meast.ir.', PoolAction('dnstt_1'))
+      addAction('s1.meast.ir.', PoolAction('slip_1'))
+      CONF
+      exec dnsdist -C /tmp/dnsdist.conf --supervised --disable-syslog
       "
     networks:
       tunnel_net:
@@ -36,7 +45,7 @@ services:
   # ۲. سرور DNSTT اول
   # ==========================================
   dnstt-server-1:
-    image: golang:latest
+    image: golang:1.22-bookworm
     container_name: dnstt_server_1
     restart: unless-stopped
     depends_on:
@@ -49,23 +58,27 @@ services:
           memory: 500M
     command: >
       bash -c "
-      echo 'Downloading and building DNSTT...' &&
-      rm -rf /tmp/dnstt && 
-      git clone https://www.bamsoftware.com/git/dnstt.git /tmp/dnstt &&
-      cd /tmp/dnstt/dnstt-server &&
-      env GOMAXPROCS=1 go build -p 1 -ldflags=\"-s -w\" -o /usr/local/bin/dnstt-server &&
-      echo 'Starting DNSTT Server...' &&
-      /usr/local/bin/dnstt-server -udp 0.0.0.0:5353 -privkey 37d4703d2f494f7d53c505d79bf63090845852ecf4813d52eb70a764c1dd6319 d1.meast.ir 10.220.0.7:22
+      set -e
+      echo '[DNSTT] Downloading and building...'
+      rm -rf /tmp/dnstt
+      git clone --depth 1 https://www.bamsoftware.com/git/dnstt.git /tmp/dnstt
+      cd /tmp/dnstt/dnstt-server
+      env GOMAXPROCS=1 go build -p 1 -ldflags='-s -w' -o /usr/local/bin/dnstt-server .
+      echo '[DNSTT] Build complete. Starting server...'
+      exec /usr/local/bin/dnstt-server \
+        -udp 0.0.0.0:5353 \
+        -privkey 37d4703d2f494f7d53c505d79bf63090845852ecf4813d52eb70a764c1dd6319 \
+        d1.meast.ir 10.220.0.7:22
       "
     networks:
       tunnel_net:
         ipv4_address: 10.220.0.3
 
   # ==========================================
-  # ۳. سرور Slipstream اول (نسخه نهایی: دانلود مستقیم + کتابخانه حیاتی)
+  # ۳. سرور Slipstream اول
   # ==========================================
   slipstream-server-1:
-    image: debian:stable-slim
+    image: debian:bookworm-slim
     container_name: slipstream_server_1
     restart: unless-stopped
     depends_on:
@@ -74,24 +87,33 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.05'
+          cpus: '0.10'
           memory: 150M
     command: >
       sh -c "
-      apt-get update && apt-get install -y curl ca-certificates libgcc-s1 &&
-      curl -L https://github.com/EndPositive/slipstream/releases/download/v0.1.0/slipstream-server-v0.1.0-linux-x86_64 -o /usr/local/bin/slipstream-server &&
-      chmod +x /usr/local/bin/slipstream-server &&
-      exec /usr/local/bin/slipstream-server --dns-listen-port=8853 --target-address=10.220.0.7:22 --domain=s1.meast.ir
+      set -e
+      echo '[Slipstream] Installing dependencies...'
+      apt-get update -qq
+      apt-get install -y --no-install-recommends curl ca-certificates libgcc-s1 libc6
+      echo '[Slipstream] Downloading binary...'
+      curl -fSL https://github.com/EndPositive/slipstream/releases/download/v0.1.0/slipstream-server-v0.1.0-linux-x86_64 \
+        -o /usr/local/bin/slipstream-server
+      chmod +x /usr/local/bin/slipstream-server
+      echo '[Slipstream] Starting server...'
+      exec /usr/local/bin/slipstream-server \
+        --dns-listen-port=8853 \
+        --target-address=10.220.0.7:22 \
+        --domain=s1.meast.ir
       "
     networks:
       tunnel_net:
         ipv4_address: 10.220.0.4
-                 
+
   # ==========================================
-  # ۴. سرویس SSH اختصاصی (مجهز به سیستم بررسی سلامت)
+  # ۴. سرویس SSH اختصاصی
   # ==========================================
   ssh-server:
-    image: debian:stable-slim
+    image: debian:bookworm-slim
     container_name: tunnel_ssh
     restart: unless-stopped
     deploy:
@@ -100,25 +122,38 @@ services:
           cpus: '0.2'
           memory: 250M
     healthcheck:
-      test: ["CMD-SHELL", "pidof sshd || exit 1"]
+      test: ["CMD-SHELL", "ss -tlnp | grep -q ':22' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10
+      start_period: 30s
     command:
       - sh
       - -c
       - |
-        apt-get update
-        apt-get install -y openssh-server socat
+        set -e
+        echo '[SSH] Installing packages...'
+        apt-get update -qq
+        apt-get install -y --no-install-recommends openssh-server iproute2 socat
         mkdir -p /run/sshd
-        (useradd -m -s /bin/bash netmod || true)
+
+        # ایجاد کاربر تانل
+        id netmod >/dev/null 2>&1 || useradd -m -s /bin/bash netmod
         echo 'netmod:123456' | chpasswd
-        echo 'AllowTcpForwarding yes' >> /etc/ssh/sshd_config
-        echo 'GatewayPorts yes' >> /etc/ssh/sshd_config
-        echo 'PermitTunnel yes' >> /etc/ssh/sshd_config
-        
+
+        # تنظیمات SSH
+        cat >> /etc/ssh/sshd_config << 'SSHCONF'
+        AllowTcpForwarding yes
+        GatewayPorts yes
+        PermitTunnel yes
+        ClientAliveInterval 60
+        ClientAliveCountMax 3
+        SSHCONF
+
+        # پراکسی DNS برای resolving داخلی
         socat TCP4-LISTEN:53,bind=127.0.0.53,reuseaddr,fork TCP4:1.1.1.1:53 &
-        
+
+        echo '[SSH] Starting sshd...'
         exec /usr/sbin/sshd -D -e
     networks:
       tunnel_net:
